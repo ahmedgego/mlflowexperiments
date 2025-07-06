@@ -1,10 +1,7 @@
-# The data set used in this example is from http://archive.ics.uci.edu/ml/datasets/Wine+Quality
-# P. Cortez, A. Cerdeira, F. Almeida, T. Matos and J. Reis.
-# Modeling wine preferences by data mining from physicochemical properties. In Decision Support Systems, Elsevier, 47(4):547-553, 2009.
-
 import os
 import warnings
 import sys
+import logging
 
 import pandas as pd
 import numpy as np
@@ -14,9 +11,8 @@ from sklearn.linear_model import ElasticNet
 from urllib.parse import urlparse
 import mlflow
 from mlflow.models import infer_signature
-import mlflow.sklearn
-
-import logging
+import dagshub
+import joblib  # For saving model
 
 logging.basicConfig(level=logging.WARN)
 logger = logging.getLogger(__name__)
@@ -43,6 +39,7 @@ if __name__ == "__main__":
         logger.exception(
             "Unable to download training & test CSV, check your internet connection. Error: %s", e
         )
+        sys.exit(1)
 
     # Split the data into training and test sets. (0.75, 0.25) split.
     train, test = train_test_split(data)
@@ -56,43 +53,36 @@ if __name__ == "__main__":
     alpha = float(sys.argv[1]) if len(sys.argv) > 1 else 0.5
     l1_ratio = float(sys.argv[2]) if len(sys.argv) > 2 else 0.5
 
+    dagshub.init(repo_owner='ahmedgego', repo_name='mlflowexperiments', mlflow=True)
+
     with mlflow.start_run():
         lr = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, random_state=42)
         lr.fit(train_x, train_y)
 
         predicted_qualities = lr.predict(test_x)
 
-        (rmse, mae, r2) = eval_metrics(test_y, predicted_qualities)
+        rmse, mae, r2 = eval_metrics(test_y, predicted_qualities)
 
-        print("Elasticnet model (alpha={:f}, l1_ratio={:f}):".format(alpha, l1_ratio))
-        print("  RMSE: %s" % rmse)
-        print("  MAE: %s" % mae)
-        print("  R2: %s" % r2)
+        print(f"Elasticnet model (alpha={alpha}, l1_ratio={l1_ratio}):")
+        print(f"  RMSE: {rmse}")
+        print(f"  MAE: {mae}")
+        print(f"  R2: {r2}")
 
         mlflow.log_param("alpha", alpha)
         mlflow.log_param("l1_ratio", l1_ratio)
         mlflow.log_metric("rmse", rmse)
-        mlflow.log_metric("r2", r2)
         mlflow.log_metric("mae", mae)
+        mlflow.log_metric("r2", r2)
 
-        predictions = lr.predict(train_x)
-        signature = infer_signature(train_x, predictions)
+        # Save and log model manually as artifact (works with DAGsHub)
+        model_dir = "model_dir"
+        os.makedirs(model_dir, exist_ok=True)
+        model_path = os.path.join(model_dir, "model.joblib")
+        joblib.dump(lr, model_path)
 
-        ## For Remote server only(DAGShub)
+        mlflow.log_artifact(model_path, artifact_path="model")
 
-        #remote_server_uri="https://dagshub.com/krishnaik06/mlflowexperiments.mlflow"
-        #mlflow.set_tracking_uri(remote_server_uri)
-
-        tracking_url_type_store = urlparse(mlflow.get_tracking_uri()).scheme
-
-        # Model registry does not work with file store
-        if tracking_url_type_store != "file":
-            # Register the model
-            # There are other ways to use the Model Registry, which depends on the use case,
-            # please refer to the doc for more information:
-            # https://mlflow.org/docs/latest/model-registry.html#api-workflow
-            mlflow.sklearn.log_model(
-                lr, "model", registered_model_name="ElasticnetWineModel",signature= signature
-            )
-        else:
-            mlflow.sklearn.log_model(lr, "model", signature= signature)
+        # Optional: log signature for model input/output
+        predictions_train = lr.predict(train_x)
+        signature = infer_signature(train_x, predictions_train)
+        mlflow.log_param("signature", str(signature))  # you can log it as a param or skip if you want
